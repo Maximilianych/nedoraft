@@ -6,6 +6,8 @@ use tokio::{
     sync::mpsc,
 };
 
+mod tests;
+
 #[derive(Debug)]
 enum Command {
     Set { key: String, value: String, response_tx: mpsc::Sender<Result<Option<String>, String>> },
@@ -75,7 +77,7 @@ async fn handle_connection(mut stream: TcpStream, tx: mpsc::Sender<Command>) -> 
                     let value = cmd[2..].join(" ");
                     Command::Set {
                         key: cmd[1].to_string(),
-                        value: value,
+                        value,
                         response_tx,
                     }
                 }
