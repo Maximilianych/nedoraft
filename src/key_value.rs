@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream},
+    net::{tcp::WriteHalf, TcpListener, TcpStream},
     sync::mpsc,
 };
 
@@ -66,78 +66,88 @@ async fn handle_connection(mut stream: TcpStream, tx: mpsc::Sender<Command>) -> 
                 return Err(e.into());
             }
         }
-        // Parser
-        println!("Recived string: {}", raw_string.trim());
-        let cmd: Vec<_> = raw_string.trim().split_whitespace().collect();
-        println!("Splited cmd: {:?}", cmd);
 
-        let command = if !cmd.is_empty() {
-            match cmd[0].to_uppercase().as_str() {
-                "SET" if cmd.len() >= 3 => {
-                    let value = cmd[2..].join(" ");
-                    Command::Set {
-                        key: cmd[1].to_string(),
-                        value,
-                        response_tx,
-                    }
-                }
-                "GET" if cmd.len() >= 2 => Command::Get {
-                    key: cmd[1].to_string(),
-                    response_tx,
-                },
-                "DELETE" if cmd.len() >= 2 => Command::Detete {
-                    key: cmd[1].to_string(),
-                    response_tx,
-                },
-                _ => Command::Error { response_tx },
-            }
-        } else {
-            Command::Error { response_tx }
-        };
-        println!("Command: {:?}", command);
+        let command = parse_messages(raw_string, response_tx);
 
         if let Err(e) = tx.send(command).await {
             eprintln!("Failed to send command to state_manager task: {}", e);
             return Ok(());
         }
 
-        match response_rx.recv().await {
-            Some(Ok(Some(mut response))) => {
-                println!("Sending success response: {}", response);
-                if !response.ends_with('\n') {
-                    response.push('\n');
-                }
-                if let Err(e) = writer.write_all(response.as_bytes()).await {
-                    eprintln!("Failed to write response to client: {}", e);
-                }
-            }
-            Some(Ok(None)) => {
-                println!("Sending empty/not-found response");
-                if let Err(e) = writer.write_all(b"\n").await {
-                    eprintln!("Failed to write empty response to client: {}", e);
-                }
-            }
-            Some(Err(e)) => { 
-                println!("Sending error response: {}", e);
-                if let Err(write_err) = writer.write_all(e.as_bytes()).await {
-                    eprintln!("Failed to write error response to client: {}", write_err);
-                }
-                if !e.ends_with('\n') {
-                    let _ = writer.write_all(b"\n").await;
-                }
-            }
-            None => {
-                eprintln!("Response channel closed unexpectedly.");
-                let error_msg = "Internal server error: Handler task failed.\n";
-                if let Err(e) = writer.write_all(error_msg.as_bytes()).await {
-                    eprintln!("Failed to write internal error message to client: {}", e);
-                }
-            }
-        }
+        let response = response_rx.recv().await;
+        send_response(response, writer).await;
+    }
+}
 
-        if let Err(e) = writer.flush().await {
-            eprintln!("Failed to flush writer: {}", e);
+fn parse_messages(raw_string: String, response_tx: mpsc::Sender<Result<Option<String>, String>>) -> Command {
+    println!("Recived string: {}", raw_string.trim());
+    let cmd: Vec<_> = raw_string.trim().split_whitespace().collect();
+    println!("Splited cmd: {:?}", cmd);
+
+    let command = if !cmd.is_empty() {
+        match cmd[0].to_uppercase().as_str() {
+            "SET" if cmd.len() >= 3 => {
+                let value = cmd[2..].join(" ");
+                Command::Set {
+                    key: cmd[1].to_string(),
+                    value,
+                    response_tx,
+                }
+            }
+            "GET" if cmd.len() >= 2 => Command::Get {
+                key: cmd[1].to_string(),
+                response_tx,
+            },
+            "DELETE" if cmd.len() >= 2 => Command::Detete {
+                key: cmd[1].to_string(),
+                response_tx,
+            },
+            _ => Command::Error { response_tx },
         }
+    } else {
+        Command::Error { response_tx }
+    };
+
+    command
+}
+
+async fn send_response(response: Option<Result<Option<String>, String>>, mut writer: WriteHalf<'_>) {
+    match response {
+        Some(Ok(Some(mut response))) => {
+            println!("Sending success response: {}", response);
+            if !response.ends_with('\n') {
+                response.push('\n');
+            }
+            if let Err(e) = writer.write_all(response.as_bytes()).await {
+                eprintln!("Failed to write response to client: {}", e);
+            }
+        }
+        Some(Ok(None)) => {
+            println!("Sending empty/not-found response");
+            if let Err(e) = writer.write_all(b"\n").await {
+                eprintln!("Failed to write empty response to client: {}", e);
+            }
+        }
+        Some(Err(e)) => { 
+            println!("Sending error response: {}", e);
+            if let Err(write_err) = writer.write_all(e.as_bytes()).await {
+                eprintln!("Failed to write error response to client: {}", write_err);
+            }
+            if !e.ends_with('\n') {
+                let _ = writer.write_all(b"\n").await;
+            }
+        }
+        None => {
+            eprintln!("Response channel closed unexpectedly.");
+            let error_msg = "Internal server error: Handler task failed.\n";
+            if let Err(e) = writer.write_all(error_msg.as_bytes()).await {
+                eprintln!("Failed to write internal error message to client: {}", e);
+            }
+        }
+    }
+
+    if let Err(e) = writer.flush().await {
+        eprintln!("Failed to flush writer: {}", e);
     }
 }
 
